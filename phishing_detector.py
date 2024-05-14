@@ -1,0 +1,74 @@
+import argparse
+import os
+import torch
+import torch_directml
+import re
+import joblib
+from training import LSTMClassifier
+from read_email import extract_body_from_eml
+
+
+def preprocess_text(text):
+    # Remove hyperlinks
+    text = re.sub(r'http\S+', '', text)
+
+    # Remove punctuations
+    text = re.sub(r'[^\w\s]', '', text)
+
+    # Convert to lowercase
+    text = text.lower()
+
+    # Remove extra spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def main(email_path):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 提取邮件正文并预处理
+    email_file_path = os.path.join(script_dir, 'test.eml')
+    email_body = extract_body_from_eml(email_file_path)
+    text = preprocess_text(email_body)
+
+    # 加载预训练的TfidfVectorizer
+    tf = joblib.load(os.path.join(script_dir, 'tfidf_vectorizer.pkl'))  # dimension reduction
+
+    # 将文本转换为TF-IDF向量
+    text = tf.transform([text]).toarray()
+
+    # 加载模型
+    dml = torch_directml.device()
+    model_path = os.path.join(script_dir, 'model.pth')
+    state_dict = torch.load(model_path, map_location=dml)
+    input_dim = 10000
+    hidden_dim = 128    
+    layer_dim = 1       # Number of LSTM layers
+    output_dim = 2      # Number of unique classes
+
+    model = LSTMClassifier(input_dim, hidden_dim, layer_dim, output_dim).to(dml)
+    model.load_state_dict(state_dict)
+    model.eval()  # 设置模型为评估模式，这会关闭诸如Dropout这样的训练时特有的层
+
+    # 预测
+    input_tensor = torch.tensor(text, dtype=torch.float32).to(dml)
+    # 添加一个时间步维度，因为LSTM模型可能期望三维输入 (batch_size, sequence_length, feature_dim)
+    if input_tensor.dim() == 2:
+        input_tensor = input_tensor.unsqueeze(0)
+
+    with torch.no_grad():
+        output = model(input_tensor)
+        _, predicted_class = torch.max(output, 1)  # 假设是分类任务，获取最高概率的类别
+
+    # 解释结果
+    is_phishing = "是钓鱼邮件" if predicted_class.item() == 1 else "不是钓鱼邮件"
+    print(is_phishing)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Phishing Email Detector")
+    parser.add_argument("email_path", type=str, help="Path to the .eml email file")
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.email_path):
+        print("The provided email file does not exist.")
+    else:
+        main(args.email_path)
